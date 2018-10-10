@@ -111,7 +111,7 @@ class Collector(object):
         self._threads[log] = t
         return t
 
-    def join(self):
+    def wait(self):
         if not self._started:
             raise NotStarted
 
@@ -168,7 +168,7 @@ def stop():
 
 
 def wait():
-    default_collector.join()
+    default_collector.wait()
 
 
 def set_output(output):
