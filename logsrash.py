@@ -11,15 +11,31 @@ import time
 class File:
     path: str
     regexp: object
+    parser: object
 
     def __hash__(self):
         return id(self)
 
 
 class CollectorThread(threading.Thread):
-    def __init__(self, *args, **kw):
-        super().__init__(*args, **kw)
+    def __init__(self, *args, **kwargs):
+        kwargs['target'] = self._collect_log
+        super().__init__(*args, **kwargs)
         self.graceful_shutdown = threading.Event()
+
+    def _collect_log(self, identifier, log, output, canceller):
+        for line in tailer.follow(open(log.path)):
+            try:
+                data = log.regexp.match(line).groupdict()
+            except AttributeError:
+                data = {}
+            else:
+                data = log.parser.parse(data)
+
+            output.write(identifier, log.path, data)
+
+            if self.graceful_shutdown.is_set() or canceller.is_set():
+                return
 
 
 class AlreadyStarted(Exception):
@@ -30,15 +46,26 @@ class NotStarted(Exception):
     pass
 
 
+class NoopParser(object):
+    def parse(self, data):
+        return data
+
+
+noop_parser = NoopParser()
+
+
 class Registry(object):
     def __init__(self):
         self.logfiles = []
 
-    def register(self, path, regexp):
-        self.logfiles.append(File(path, re.compile(regexp)))
+    def register(self, path, regexp, parser=noop_parser):
+        self.logfiles.append(File(path, re.compile(regexp), parser))
 
     def get_all(self):
         return self.logfiles[:]
+
+    def clear_all(self):
+        self.logfiles = []
 
 
 class ScreenOutput(object):
@@ -64,13 +91,6 @@ class Collector(object):
         self._started = False
         self._threads = {}
 
-    def log_stream(self, log):
-        for line in tailer.follow(open(log.path)):
-            data = log.regexp.match(line).groupdict()
-            self.output.write(self.identifier, log.path, data)
-            if self.canceller.is_set():
-                return
-
     def start(self):
         if self._started:
             raise AlreadyStarted
@@ -85,7 +105,9 @@ class Collector(object):
 
     def _create_thread(self, log):
         t = CollectorThread(
-                target=self.log_stream, args=(log,), daemon=True)
+            daemon=True, kwargs={
+                'identifier': self.identifier, 'log': log,
+                'canceller': self.canceller, 'output': self.output})
         self._threads[log] = t
         return t
 
@@ -106,13 +128,16 @@ class Collector(object):
             raise NotStarted
 
     def notify_update(self):
+        if not self._started:
+            return
+
         all_logs = self.logs.get_all()
 
         for log in all_logs:
             if log not in self._threads:
                 self._create_thread(log).start()
 
-        for log in self._threads.keys():
+        for log in list(self._threads.keys()):
             if log not in all_logs:
                 t = self._threads.pop(log)
                 t.graceful_shutdown.set()
@@ -124,8 +149,13 @@ default_collector = Collector(default_registry, ScreenOutput())
 # shortcut funcs
 
 
-def register(path, regexp):
-    default_registry.register(path, regexp)
+def register(path, regexp, parser=noop_parser):
+    default_registry.register(path, regexp, parser)
+    default_collector.notify_update()
+
+
+def unregister_all():
+    default_registry.clear_all()
     default_collector.notify_update()
 
 
